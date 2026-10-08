@@ -1,0 +1,337 @@
+version: "2.0"
+
+metadata:
+  id: intro-to-docker-sandboxes
+  title: "Intro to Docker Sandboxes"
+  summary: >
+    Contain, Control, Choice, Capacity. Watch an agent escape a plain container,
+    then give it a boundary it can't cross and make the inside your own.
+
+# In-memory state. Scenarios read it in `when.state` and write it in `then.state`.
+state:
+  vuln:
+    agentRunning: false        # plain container with the Docker socket mounted
+  sandbox:
+    created: false             # the sbx microVM exists
+    name: ""
+  secret:
+    anthropicStored: false     # host holds the model API key; proxy injects it
+  policy:
+    profile: balanced          # Locked Down | Balanced | Open
+    thirdPartyAllowed: false   # has the learner added an allow rule yet
+  kits:
+    agent: claude              # the one agent kit (the harness)
+    mixins: []                 # stacked mixin kits
+  env:
+    running: false             # sbxenv.yaml-defined sandbox is up
+
+settings:
+  pace:
+    pull: 650      # simulated layer / kit download
+    boot: 900      # simulated microVM boot
+    call: 500      # simulated network round-trip
+
+defaults:
+  unmatched:
+    stderr: ["command not found - this command isn't part of the lab."]
+    exit: 1
+
+scenarios:
+  # ===========================================================================
+  # Utility - orientation
+  # ===========================================================================
+  - id: sbx-version
+    when:
+      command: [sbx, version]
+    then:
+      output:
+        - "Docker Sandboxes (sbx)"
+        - " Version:  0.6.0"
+        - " MicroVM:  krunkit"
+
+  - id: sbx-ls
+    when:
+      command: [sbx, ls]
+    then:
+      output:
+        - "SANDBOX      AGENT    STATUS     WORKSPACE"
+        - "{{ state.sandbox.name }}    {{ state.kits.agent }}   running    ./web-app"
+
+  # ===========================================================================
+  # Section 1 - Why not containers?  (the escape, on the HOST daemon)
+  # ===========================================================================
+  # The common way people hand an agent power: a container with the Docker
+  # socket mounted. Matched FIRST (by --name agent) so it doesn't fall into the
+  # broad host-escape scenario below.
+  - id: vuln-run
+    when:
+      command: [docker, run]
+      args: { --name: { oneOf: [agent] } }
+      terminal: host
+    then:
+      state: { vuln.agentRunning: true }
+      output:
+        - { text: "Unable to find image 'acme/coding-agent:latest' locally", delay: short }
+        - { text: "latest: Pulling from acme/coding-agent", delay: pull }
+        - { text: "Status: Downloaded newer image for acme/coding-agent:latest", delay: short }
+        - "a1b2c3d4e5f6"
+        - ""
+        - "agent started. The Docker socket is mounted, so from inside the"
+        - "container the agent can drive the HOST's Docker daemon."
+
+  # The agent, using that socket, launches a sibling container that mounts the
+  # whole host filesystem and reads a private key. Broad: any other `docker run`
+  # on the host terminal lands here.
+  - id: escape-host
+    when:
+      command: [docker, run]
+      terminal: host
+    then:
+      output:
+        - { text: "latest: Pulling from library/alpine", delay: pull }
+        - { text: "Status: Downloaded newer image for alpine:latest", delay: short }
+        - "-----BEGIN OPENSSH PRIVATE KEY-----"
+        - "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gt"
+        - "ZWQyNTUxOQAAACD5kQ0pG1rT3fakeFAKEfakeKEYdonotUSEme9aXwAAAJhVERAAVREQ"
+        - "...host SSH private key, read from /host/root/.ssh/id_ed25519..."
+        - "-----END OPENSSH PRIVATE KEY-----"
+        - ""
+        - "The container escaped. Through the mounted socket it started a second"
+        - "container with / bind-mounted, and read a key off YOUR machine."
+
+  # ===========================================================================
+  # Section 2 - Contain  (the same escape fails; credentials injected by proxy)
+  # ===========================================================================
+  - id: sbx-create
+    when:
+      command: [sbx, create]
+      terminal: host
+    then:
+      state: { sandbox.created: true, sandbox.name: "agent-box" }
+      output:
+        - { text: "Booting microVM (own kernel, own filesystem, own Docker engine)...", delay: boot }
+        - "Created sandbox agent-box"
+        - "  isolation   microVM - the host is out of reach"
+        - "  network     every outbound request passes through the proxy"
+        - "  workspace   ./web-app (the only host folder shared in)"
+        - ""
+        - "Attach with:  sbx run --name agent-box"
+
+  # The SAME command from Section 1 - but typed inside the box. The sandbox has
+  # its own Docker engine and no bind mount of the host, so there is no /host.
+  - id: escape-box
+    when:
+      command: [docker, run]
+      terminal: box
+    then:
+      output:
+        - { text: "latest: Pulling from library/alpine", delay: pull }
+        - "cat: can't open '/host/root/.ssh/id_ed25519': No such file or directory"
+        - ""
+        - "Same command. Nothing to read. This Docker engine belongs to the"
+        - "sandbox, and the host filesystem was never mounted into it."
+
+  # Prove the model API key is NOT inside the box.
+  - id: env-box
+    when:
+      command: [env]
+      terminal: box
+    then:
+      output:
+        - "HOSTNAME=agent-box"
+        - "HOME=/home/agent"
+        - "PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/bin"
+        - "WORKSPACE=/work"
+        - "# no ANTHROPIC_API_KEY here - the sandbox never receives it"
+
+  # Store the key on the HOST. It stays host-side; the proxy injects it on exit.
+  - id: secret-set
+    when:
+      command: [sbx, secret, set]
+      terminal: host
+    then:
+      state: { secret.anthropicStored: true }
+      output:
+        - "Enter value for 'anthropic': ****************"
+        - "Stored secret 'anthropic' (host-only)."
+        - "The proxy adds it to matching outbound requests. The agent never holds it."
+
+  - id: secret-ls
+    when:
+      command: [sbx, secret, ls]
+      terminal: host
+    then:
+      output:
+        - "SERVICE     SCOPE       INJECTED BY"
+        - "anthropic   host-only   proxy (on the way out)"
+
+  # The agent calls the model API with NO key attached - and it still works,
+  # because the proxy added the credential outside the box. (Gated on the secret
+  # being stored first; the allowed scenario is listed before the blocked one.)
+  - id: curl-anthropic-ok
+    when:
+      command: [curl]
+      args: { 0: { oneOf: ["https://api.anthropic.com/v1/models"] } }
+      state: { secret.anthropicStored: true }
+      terminal: box
+    then:
+      output:
+        - "> GET /v1/models"
+        - "> Authorization: (none - the request left the box with no key)"
+        - { text: "< 200 OK", delay: call }
+        - '< {"data":[{"id":"claude-opus-4"},{"id":"claude-sonnet-4"}]}'
+        - ""
+        - "200 OK. The box sent no credential; the proxy injected it on the way out."
+
+  - id: curl-anthropic-nokey
+    when:
+      command: [curl]
+      args: { 0: { oneOf: ["https://api.anthropic.com/v1/models"] } }
+      terminal: box
+    then:
+      output:
+        - "> GET /v1/models"
+        - { text: "< 401 Unauthorized", delay: call }
+        - ""
+        - "No secret stored yet, so the proxy had nothing to inject."
+        - "Store one with:  sbx secret set anthropic"
+
+  # ===========================================================================
+  # Section 3 - Control  (policy profiles, the log, one allow rule)
+  # ===========================================================================
+  - id: policy-ls
+    when:
+      command: [sbx, policy, ls]
+      terminal: host
+    then:
+      output:
+        - "PROFILE    STATE"
+        - "balanced   active   (common dev endpoints allowed, everything else denied)"
+        - ""
+        - "PROFILES   locked-down . balanced . open"
+        - "Add rules on top with:  sbx policy allow <host>   /   sbx policy deny <host>"
+
+  # The allowed path is listed first so once a rule exists it wins over blocked.
+  - id: curl-thirdparty-allowed
+    when:
+      command: [curl]
+      args: { 0: { oneOf: ["https://api.weirdthirdparty.io"] } }
+      state: { policy.thirdPartyAllowed: true }
+      terminal: box
+    then:
+      output:
+        - { text: "< 200 OK", delay: call }
+        - '< {"status":"ok"}'
+        - ""
+        - "Allowed now. Same request, same boundary - you just moved where it sits."
+
+  - id: curl-thirdparty-blocked
+    when:
+      command: [curl]
+      args: { 0: { oneOf: ["https://api.weirdthirdparty.io"] } }
+      terminal: box
+    then:
+      output:
+        - { text: "curl: (7) blocked by network policy (profile: balanced)", delay: call }
+        - "api.weirdthirdparty.io is not on the allowlist. The request stopped at the proxy."
+      exit: 7
+
+  - id: policy-log
+    when:
+      command: [sbx, policy, log]
+      terminal: host
+    then:
+      output:
+        - "TIME      SANDBOX     DECISION   DESTINATION"
+        - "just now  agent-box   ALLOW      registry-1.docker.io:443"
+        - "just now  agent-box   ALLOW      api.anthropic.com:443"
+        - "just now  agent-box   DENY       api.weirdthirdparty.io:443"
+        - ""
+        - "Every connection is logged - so you can see exactly what the agent tried to reach."
+
+  - id: policy-allow
+    when:
+      command: [sbx, policy, allow]
+      args: { 0: { oneOf: ["api.weirdthirdparty.io"] } }
+      terminal: host
+    then:
+      state: { policy.thirdPartyAllowed: true }
+      output:
+        - "Added allow rule: api.weirdthirdparty.io (on top of profile 'balanced')."
+        - "Retry the request - it goes through now."
+
+  # ===========================================================================
+  # Section 4 - Choice  (swap the agent harness, stack mixin kits)
+  # ===========================================================================
+  # One scenario handles any agent (claude, codex, ...). The boundary is unchanged.
+  - id: sbx-run-agent
+    when:
+      command: [sbx, run]
+      args: { 0: { any: true } }
+      terminal: host
+    then:
+      state: { kits.agent: "{{ args.0 }}" }
+      output:
+        - { text: "Pulling agent kit sbx/{{ args.0 }}-kit:latest ...", delay: pull }
+        - "Agent is now: {{ args.0 }}"
+        - ""
+        - "MicroVM + proxy: UNCHANGED. You swapped the harness inside the same box;"
+        - "the project mount and the network boundary did not move."
+
+  - id: kit-add
+    when:
+      command: [sbx, kit, add]
+      args: { 0: { any: true } }
+      terminal: host
+    then:
+      state: { "kits.mixins +=": "{{ args.0 }}" }
+      output:
+        - { text: "Pulling mixin kit {{ args.0 }} ...", delay: pull }
+        - "Added mixin: {{ args.0 }}"
+        - "It layered its tools, credentials, and network rules on top of the agent."
+
+  - id: kit-inspect
+    when:
+      command: [sbx, kit, inspect]
+      args: { 0: { any: true } }
+      terminal: host
+    then:
+      output:
+        - "KIT   {{ args.0 }}"
+        - "TYPE  mixin"
+        - ""
+        - "contributes:"
+        - "  credentials   github (SSH key, injected by proxy)"
+        - "  network       allow github.com, ssh.github.com"
+        - "  env           GIT_SSH_COMMAND"
+        - "  files         ~/.ssh/config"
+        - ""
+        - "Kits follow an open spec - package your own the same way: github.com/docker/sandbox-kit-spec"
+
+  # ===========================================================================
+  # Section 5 - Capacity  (one file, the whole sandbox; shared with the team)
+  # ===========================================================================
+  - id: env-run
+    when:
+      command: [sbx, env, run]
+      terminal: host
+    then:
+      state: { env.running: true, sandbox.created: true, sandbox.name: "web-app" }
+      output:
+        - "Reading sbxenv.yaml ..."
+        - { text: "Booting microVM for 'web-app' (agent: claude) ...", delay: boot }
+        - { text: "Pulling kit sbx/playwright-kit:latest ...", delay: pull }
+        - "Applied: agent, workspace ./web-app, kits, network policy."
+        - "Attaching to the agent session."
+        - ""
+        - "Same boundary, same kits, same policy - from one file in the repo,"
+        - "not a sequence anyone has to remember."
+
+  - id: env-rm
+    when:
+      command: [sbx, env, rm]
+      terminal: host
+    then:
+      state: { env.running: false }
+      output:
+        - "Removed the sandbox and everything sbxenv.yaml created."

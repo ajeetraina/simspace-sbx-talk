@@ -1,0 +1,79 @@
+title: "Intro to Docker Sandboxes"
+description: >
+  Coding agents are useful because they act on their own - plan, run commands,
+  observe, repeat, hundreds of times without asking. That is also the risk. Give
+  the agent a trusted boundary it can't cross, then make the inside your own: the
+  tools, the agent, the endpoints, and one file the whole team shares.
+
+# Landing-page card. The sibling slides deck is `order: 1` (watch the talk), so
+# this hands-on lab is `order: 2` (then do the lab). labs.json is GENERATED from
+# this block - never edit labs.json by hand.
+catalog:
+  icon: shield_lock
+  order: 2
+  tags: ["ai agents", "sandboxes", "sbx", "security", "microvm"]
+  estimatedMinutes: 45
+
+# Command behaviour lives in simulator.yaml (relative to this file).
+simulator: simulator.yaml
+
+# Two terminals share one virtual machine, but tell two sides of the story:
+#   host - your machine, where you run the `sbx` CLI
+#   box  - a shell inside the sandbox, where the agent lives
+# Scenarios scoped with `when.terminal` let the SAME command (a container escape)
+# succeed on `host` and fail inside `box` - that contrast is the whole point.
+terminals:
+  - id: host
+    title: Your machine
+    icon: terminal
+  - id: box
+    title: Sandbox
+    icon: deployed_code
+
+# Seed the virtual filesystem with a small project to act on. Built-in `ls`/`cat`
+# reflect these immediately; save-as blocks (like sbxenv.yaml) add more on top.
+files:
+  README.md: |
+    # web-app
+
+    A small web service the agent is asked to work on. A React frontend over an
+    Express API. In this lab you don't change the app - you change the box the
+    agent runs in.
+
+    Run locally:  npm install && npm start
+    API:          http://localhost:3000/api
+  package.json: |
+    {
+      "name": "web-app",
+      "version": "1.0.0",
+      "main": "src/index.js",
+      "scripts": { "start": "node src/index.js", "test": "vitest run" },
+      "dependencies": { "express": "^4.19.2" }
+    }
+  src/index.js: |
+    const express = require("express");
+    const app = express();
+    app.get("/api", (_req, res) => res.json({ ok: true }));
+    app.listen(3000, () => console.log("web-app on :3000"));
+
+# Ordered instruction pages (markdown), rendered in the left-hand panel.
+sections:
+  - title: "Introduction - agents that act"
+    contentPath: 00-introduction.md
+  - title: "Why not containers?"
+    contentPath: 01-why-not-containers.md
+  - title: "Pillar 1 - Contain"
+    contentPath: 02-contain.md
+  - title: "Pillar 2 - Control"
+    contentPath: 03-control.md
+  - title: "Pillar 3 - Choice"
+    contentPath: 04-choice.md
+  - title: "Pillar 4 - Capacity"
+    contentPath: 05-capacity.md
+  - title: "Recap & get started"
+    contentPath: 06-recap.md
+
+# $$name$$ in markdown is replaced with these values.
+variables:
+  sandbox: agent-box
+  thirdParty: api.weirdthirdparty.io
